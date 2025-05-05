@@ -1,0 +1,18 @@
+# Checkpoints and large data
+checkpoints/
+data/
+bitcoin_otc_pyg_raw/
+
+# Logs
+*.log
+myout.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE/Editor specific
+.idea/
+.vscode/
+
+# Add other things you want to ignore
