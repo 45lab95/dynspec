@@ -1,25 +1,18 @@
-# models/dynamic_freq_gnn.py
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Dict, Tuple, Optional
-
-# 导入我们定义的模块
-from .filters import LowPassFilterLayer, HighPassFilterLayer # 或者导入 BaseFilterLayer 然后实例化
+from .filters import LowPassFilterLayer, HighPassFilterLayer 
 from .sequence_encoder import LSTMWrapper
-import numpy as np # Combination 类需要 numpy
-import math # 可能需要 math
+import numpy as np
+import math 
 
 
 
 class Combination(nn.Module):
     '''
     A mod combination the bases of polynomial filters.
-    Args:
-        channels (int): number of feature channels.
-        level (int): number of bases to combine.
-        sole (bool): whether or not use the same filter for all output channels.
     '''
     def __init__(self, channels, level, dropout, sole=False):
         super().__init__()
@@ -61,7 +54,6 @@ class LinkPredictorHead(nn.Module):
         return logit
 
 
-# --- 修改后的 DynamicFrequencyGNN 类定义 ---
 class DynamicFrequencyGNN(nn.Module):
     def __init__(self,
 
@@ -115,17 +107,10 @@ class DynamicFrequencyGNN(nn.Module):
         total_unibasis_dim = snapshots_data[0]['unibasis_features'].shape[1]
         current_F = self.unibasis_base_feature_dim
 
-        # 验证维度是否匹配 (可选但推荐)
         if total_unibasis_dim % (self.K + 1) != 0:
             raise ValueError(f"UniBasis 特征维度 ({total_unibasis_dim}) "
                              f"无法被 K+1 ({self.K+1}) 整除。")
         single_feature_dim_F_calculated = total_unibasis_dim // (self.K + 1)
-
-        if single_feature_dim_F_calculated != current_F:
-             print(f"警告: data_loader 计算得到的单个基维度 F ({single_feature_dim_F_calculated}) "
-                   f"与模型初始化时的维度 ({current_F}) 不符。将继续使用初始化维度。")
-             # 这里可以选择是否抛出错误或强制使用某个值，但默认继续使用 current_F (初始化值)
-
         lstm_inputs = []
 
 
@@ -139,8 +124,6 @@ class DynamicFrequencyGNN(nn.Module):
                 )
             except RuntimeError as e:
                  print(f"在时间步 {t} reshape UniBasis 特征时出错: {e}")
-                 print(f"  原始形状: {unibasis_features_t.shape}")
-                 print(f"  目标形状: ({num_nodes}, {self.K + 1}, {current_F})")
                  raise e
 
             combined_repr_t = self.combination(unibasis_t_reshaped) # [N, F]

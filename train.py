@@ -95,7 +95,7 @@ def evaluate(model: DynamicFrequencyGNN,
          model_input_snapshots.append(snapshot_data)
 
     # 迭代评估目标时间步
-    for t in tqdm(range(len(target_edges_list)), desc="Evaluating Steps", leave=False): # 可选添加进度条
+    for t in range(len(target_edges_list)): 
         target_edges_t = target_edges_list[t]
         target_pos_edges = target_edges_t['pos_edge_index'].to(device)
         target_neg_edges = target_edges_t['neg_edge_index'].to(device)
