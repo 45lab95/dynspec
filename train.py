@@ -16,6 +16,13 @@ from utils.metrics import roc_auc_score, average_precision_score # 假设 metric
 from utils.torch_utils import set_seed, get_device # 假设 torch_utils.py 中有这些函数
 from models.model import DynamicFrequencyGNN # 导入主模型
 
+import matplotlib # 导入 matplotlib
+matplotlib.use('Agg') # 使用 Agg 后端，这样可以在没有图形界面的服务器上保存图片而不会报错
+import matplotlib.pyplot as plt # 导入 pyplot
+from utils.plot_utils import plot_training_curves # 导入我们创建的绘图函数
+
+
+
 def train_one_epoch(model: DynamicFrequencyGNN,
                     optimizer: torch.optim.Optimizer,
                     criterion: nn.Module,
@@ -182,6 +189,10 @@ def main():
     device = get_device(args.device) # 自动选择 GPU 或 CPU
     os.makedirs(args.save_dir, exist_ok=True)
     model_save_path = os.path.join(args.save_dir, args.model_name)
+    # 定义绘图保存目录和文件名
+    plot_save_dir = "plots" # 可以通过参数传入
+    plot_filename = f"curves_{args.model_name.replace('.pt', '')}.png"
+    model_save_path = os.path.join(args.save_dir, args.model_name)
 
     # --- 加载和准备数据 ---
     print("\n--- 加载数据 ---")
@@ -239,6 +250,13 @@ def main():
         link_pred_hidden_dim=args.link_pred_hidden
     ).to(device)
     print(model)
+    # --- 初始化训练历史记录 ---
+    training_history = {
+        'epoch': [],
+        'train_loss': [],
+        'val_auc': [],
+        'val_ap': []
+    }
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = nn.BCEWithLogitsLoss() # 适用于 logits 输出的二分类交叉熵
@@ -260,6 +278,12 @@ def main():
         val_auc, val_ap = evaluate(model, val_input_snapshots, val_target_edges, device) # 传入目标边列表
 
         epoch_time = time.time() - epoch_start_time
+
+        # --- 记录历史数据 ---
+        training_history['epoch'].append(epoch + 1)
+        training_history['train_loss'].append(loss)
+        training_history['val_auc'].append(val_auc)
+        training_history['val_ap'].append(val_ap)
         print(f"Epoch {epoch+1}/{args.epochs} | Time: {epoch_time:.2f}s | Avg Loss: {loss:.4f} | Val Avg AUC: {val_auc:.4f} | Val Avg AP: {val_ap:.4f}")
 
         # 早停和模型保存
@@ -276,6 +300,14 @@ def main():
 
     total_train_time = time.time() - start_time
     print(f"\n--- 训练完成 --- Total Time: {total_train_time:.2f}s")
+    
+    try:
+        plot_training_curves(training_history,
+                             title=f"Training Curves ({args.model_name.replace('.pt', '')})",
+                             save_dir=plot_save_dir,
+                             filename=plot_filename)
+    except Exception as e:
+        print(f"绘制训练曲线时发生错误: {e}")
 
     # --- 测试 ---
     print("\n--- 开始测试 ---")
