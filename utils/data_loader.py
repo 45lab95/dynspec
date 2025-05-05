@@ -7,6 +7,7 @@ from typing import List, Dict, Tuple, Optional
 from tqdm import tqdm
 
 from .preprocess_utils import compute_propagation_matrix
+from .unibasis_utils import compute_unibasis_for_snapshot
 
 def generate_node_features(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     deg = degree(edge_index[0], num_nodes=num_nodes, dtype=torch.float)
@@ -33,77 +34,112 @@ def set_to_edge_index(edge_set: set, device: torch.device) -> torch.Tensor:
 
 def load_bitcoin_otc_data(root: str = './bitcoin_otc_pyg_raw',
                           edge_window_size: int = 10,
-                          feature_generator = generate_node_features
+                          feature_generator = generate_node_features,
+                          K: int = 10, # 新增：UniBasis 阶数
+                          tau: float = 0.5, # 新增：UniBasis 混合系数
+                          h_hat_global: Optional[float] = 0.5 # 新增：全局估计同配率 (可选)
                           ) -> Tuple[List[Dict[str, torch.Tensor]], int, int]:
     """
-    加载并预处理 BitcoinOTC 数据集，为 *预测新增链接* 准备标签。
+    加载并预处理 BitcoinOTC 数据集，计算 UniBasis 特征，并为预测新增链接准备标签。
+
+    Args:
+        root (str): PyG 数据集存储的根目录。
+        edge_window_size (int): 边的持续窗口大小。
+        feature_generator (callable): 用于生成节点特征的函数。
+        K (int): UniBasis 的最大阶数。
+        tau (float): UniBasis 的混合系数 τ。
+        h_hat_global (Optional[float]): 全局使用的估计同配率 ĥ。如果为 None，
+                                        则需要实现动态计算 h_hat_t 的逻辑 (此处简化)。
+                                        默认为 0.5。
+
+    Returns:
+        Tuple[List[Dict[str, torch.Tensor]], int, int]:
+            - snapshots_data: 包含每个时间步数据的列表，每个元素是字典：
+                {
+                    'p_matrix': 传播矩阵 P_t [N, N] (sparse),
+                    'unibasis_features': 计算得到的 UniBasis 特征 [N, (K+1)*F],
+                    'pos_edge_index': 当前时间步新增的正样本边 [2, num_pos],
+                    'neg_edge_index': 当前时间步的负采样边 [2, num_neg]
+                }
+            - num_nodes: 图中的节点数量。
+            - feature_dim_F: 单个基向量的特征维度 F。
     """
     print(f"加载 BitcoinOTC 数据集 (edge_window_size={edge_window_size})...")
     dataset = BitcoinOTC(root=root, edge_window_size=edge_window_size)
     num_nodes = dataset[0].num_nodes
-    feature_dim = -1
+    feature_dim_F = -1 # 初始化单个基向量的特征维度 F
     snapshots_data = []
-    previous_edge_set = set() # 用于存储上一个时间步的边集合
+    previous_edge_set = set()
 
-    print("开始处理时间步 (为预测新增链接准备标签)...")
+    # --- 处理 h_hat ---
+    # 在这个简化版本中，我们直接使用全局 h_hat
+    # 更复杂的版本可以在这里基于历史数据动态计算 h_hat_t
+    if h_hat_global is None:
+        print("警告: 未提供 h_hat_global，将使用默认值 0.5。建议提供或实现动态计算。")
+        h_hat_current = 0.5
+    else:
+        h_hat_current = h_hat_global
+        print(f"使用全局估计同配率 h_hat = {h_hat_current:.4f}")
+
+
+    print("开始处理时间步并计算 UniBasis...")
     for t, data_t in enumerate(tqdm(dataset, desc="处理时间步")):
         current_edge_index_raw = data_t.edge_index
-        device = current_edge_index_raw.device # 获取设备
+        device = current_edge_index_raw.device
 
-        # 确保边是无向的
         current_edge_index = to_undirected(current_edge_index_raw, num_nodes=num_nodes)
         current_edge_set = edge_index_to_set(current_edge_index)
 
-        # 1. 计算传播矩阵 P_t (基于当前所有边)
+        # 1. 计算传播矩阵 P_t
         p_matrix_t = compute_propagation_matrix(current_edge_index, num_nodes)
 
-        # 2. 生成节点特征 X_t (基于当前所有边)
-        features_t = feature_generator(current_edge_index, num_nodes)
-        if feature_dim == -1:
-            feature_dim = features_t.shape[1]
+        # 2. 生成 *初始* 节点特征 X_t (用于 UniBasis 计算)
+        initial_features_t = feature_generator(current_edge_index, num_nodes)
+        if feature_dim_F == -1:
+            feature_dim_F = initial_features_t.shape[1] # 获取特征维度 F
 
-        # 3. 准备链接预测标签 (用于 t-1 预测 t 的 *新增* 链接)
-        if t > 0: # 从第二个时间步开始，才能计算新增链接
-            # 正样本：当前存在但上一步不存在的边 E_t \ E_{t-1}
+        # 3. 计算 UniBasis 特征
+        # 调用我们之前创建的函数
+        unibasis_features_t, _ = compute_unibasis_for_snapshot(
+            p_matrix=p_matrix_t,
+            features=initial_features_t,
+            K=K,
+            tau=tau,
+            h_hat=h_hat_current # 使用当前的 h_hat
+        )
+        # unibasis_features_t 的形状是 [N, (K+1)*F]
+
+        # 4. 准备链接预测标签 (新增链接)
+        if t > 0:
             new_pos_edges_set = current_edge_set - previous_edge_set
-            # 将集合转回 edge_index 格式 (确保无向)
             pos_edge_index_t = set_to_edge_index(new_pos_edges_set, device)
 
-            # 负样本：当前仍然不存在的边
-            # 需要采样不在 current_edge_set 中的边
-            # 注意：负采样数量可以与正样本数量一致，或者更多
-            num_pos_samples = pos_edge_index_t.size(1) // 2 # 除以2因为 set_to_edge_index 加了反向边
-            if num_pos_samples == 0: # 如果没有新增边，也采一些负样本（或者跳过这个时间步的损失计算）
-                num_neg_samples = 1000 # 或者其他合理值
-            else:
-                num_neg_samples = num_pos_samples # 与新增正样本数量一致
+            num_pos_samples = pos_edge_index_t.size(1) // 2
+            num_neg_samples = num_pos_samples if num_pos_samples > 0 else 1000 # 与之前逻辑相同
 
-            # 进行负采样，确保不采样到 current_edge_set 中的边
-            # PyG 的 negative_sampling 函数第一个参数是 *包含* 要避免的边的 edge_index
             neg_edge_index_t = negative_sampling(
-                edge_index=current_edge_index, # 传入当前所有存在的边，避免采样到它们
+                edge_index=current_edge_index,
                 num_nodes=num_nodes,
                 num_neg_samples=num_neg_samples,
                 method='sparse'
             )
-        else: # 第一个时间步没有前一步，无法定义新增链接，标签设为空
+        else:
             pos_edge_index_t = torch.empty((2, 0), dtype=torch.long, device=device)
             neg_edge_index_t = torch.empty((2, 0), dtype=torch.long, device=device)
 
-
+        # 存储处理好的数据
         snapshots_data.append({
-            'features': features_t,
-            'p_matrix': p_matrix_t,
-            'pos_edge_index': pos_edge_index_t, # 存储的是新增的边
-            'neg_edge_index': neg_edge_index_t  # 存储的是当前不存在的边
+            'p_matrix': p_matrix_t, # 保留 P_t，可能未来需要
+            'unibasis_features': unibasis_features_t, # 存储 UniBasis 特征
+            'pos_edge_index': pos_edge_index_t,
+            'neg_edge_index': neg_edge_index_t
         })
 
-        # 更新上一步的边集合
         previous_edge_set = current_edge_set
 
-    print("\n数据处理完成 (标签为新增链接).")
-    # 注意：返回的数据现在第一个时间步的 pos/neg edge_index 是空的
-    return snapshots_data, num_nodes, feature_dim
+    print(f"\n数据处理完成 (标签为新增链接, 特征为 UniBasis [N, (K+1)*F]). 单个基维度 F={feature_dim_F}")
+    # 返回包含 UniBasis 特征的列表、节点数、单个基的维度 F
+    return snapshots_data, num_nodes, feature_dim_F
 
 def get_dynamic_data_splits(num_time_steps: int,
                             train_ratio: float = 0.7,

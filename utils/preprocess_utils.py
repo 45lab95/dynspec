@@ -33,3 +33,22 @@ def compute_propagation_matrix(edge_index: torch.Tensor,
 
     return p_matrix
 
+def calculate_homophily(edge_index: torch.Tensor,
+                        labels: torch.Tensor,
+                        num_nodes: int) -> float:
+    """
+    计算给定图快照的边同配率 (edge homophily ratio)。
+    同配率 = (连接相同标签节点的边数) / (总边数)
+    """
+    num_edges = edge_index.size(1)
+    if num_edges == 0:
+        return 0.0 
+    row, col = edge_index[0], edge_index[1]
+    labels_row = labels[row]
+    labels_col = labels[col]
+
+    same_label_edges = (labels_row == labels_col).sum().item()
+
+    homophily_ratio = same_label_edges / num_edges
+
+    return homophily_ratio
