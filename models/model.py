@@ -1,148 +1,74 @@
+# models/dynamic_freq_gnn.py
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Dict, Tuple, Optional
-from .filters import LowPassFilterLayer, HighPassFilterLayer 
-from .sequence_encoder import LSTMWrapper
-import numpy as np
-import math 
+from typing import List, Dict, Tuple, Optional, Any
 
 
+# 导入项目模块
+from .base_model import BaseDynamicBackbone, BaseTaskHead # 导入基类
+from .dyn_spectral import DynSpectralBackbone    # 导入我们实现的 Backbone
+from .task_head import LinkPredictorHead                # 导入链接预测头
+from .sequence_encoder import LSTMWrapper # DynSpectralBackbone 会用到
 
-class Combination(nn.Module):
-    '''
-    A mod combination the bases of polynomial filters.
-    '''
-    def __init__(self, channels, level, dropout, sole=False):
-        super().__init__()
-        self.dropout = dropout
-        self.K=level
-        
-        self.comb_weight = nn.Parameter(torch.ones((1, level, 1)))
-        self.reset_parameters()            
+class DynSpectral(nn.Module):
 
-    def reset_parameters(self):
-        bound = 1.0/self.K
-        TEMP = np.random.uniform(bound, bound, self.K)  
-        self.comb_weight=nn.Parameter(torch.FloatTensor(TEMP).view(-1,self.K, 1))
-
-    def forward(self, x):
-        x = F.dropout(x, self.dropout, training=self.training)
-        x = x * self.comb_weight
-        x = torch.sum(x, dim=1)
-        return x
-
-
-
-class LinkPredictorHead(nn.Module):
-
-    def __init__(self, input_dim: int, hidden_dim: Optional[int] = None):
-        super().__init__()
-        if hidden_dim:
-            self.mlp = nn.Sequential(
-                nn.Linear(input_dim * 2, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1)
-            )
-        else:
-            self.mlp = nn.Linear(input_dim * 2, 1)
-
-    def forward(self, node_repr1: torch.Tensor, node_repr2: torch.Tensor) -> torch.Tensor:
-        combined_repr = torch.cat([node_repr1, node_repr2], dim=-1)
-        logit = self.mlp(combined_repr)
-        return logit
-
-
-class DynamicFrequencyGNN(nn.Module):
     def __init__(self,
-
-                 unibasis_base_feature_dim: int, 
-                 K: int, 
+                 device: torch.device,
+                 unibasis_base_feature_dim: int,
+                 K: int,
                  combination_dropout: float,
-
                  lstm_hidden_dim: int,
                  lstm_layers: int = 1,
                  lstm_dropout: float = 0.0,
-                 link_pred_hidden_dim: Optional[int] = None):
+                 link_pred_hidden_dim: Optional[int] = None,
+                 ):
+
         super().__init__()
+        self.device = device
+
+        self.backbone: BaseDynamicBackbone = DynSpectralBackbone(
+            device=device,
+            unibasis_base_feature_dim=unibasis_base_feature_dim,
+            K=K,
+            combination_dropout=combination_dropout,
+            lstm_hidden_dim=lstm_hidden_dim,
+            lstm_layers=lstm_layers,
+            lstm_dropout=lstm_dropout
+        ).to(device)
 
 
-        self.unibasis_base_feature_dim = unibasis_base_feature_dim
-        self.K = K
-        self.lstm_hidden_dim = lstm_hidden_dim
-
-        self.combination = Combination(
-            channels=unibasis_base_feature_dim,
-            level=K + 1,
-            dropout=combination_dropout
-        )
-
-
-        lstm_input_dim = unibasis_base_feature_dim
-        self.lstm_encoder = LSTMWrapper(
-            input_size=lstm_input_dim,
-            hidden_size=lstm_hidden_dim,
-            num_layers=lstm_layers,
-            batch_first=True,
-            dropout=lstm_dropout
-        )
-
-        self.link_predictor = LinkPredictorHead(
-            input_dim=lstm_hidden_dim,
+        self.task_head: BaseTaskHead = LinkPredictorHead(
+            node_embedding_dim=lstm_hidden_dim, # 来自 Backbone 的输出
             hidden_dim=link_pred_hidden_dim
-        )
+        ).to(device)
+
+        # (可选) 调用参数初始化
+        self.reset_parameters()
 
     def forward(self,
                 snapshots_data: List[Dict[str, torch.Tensor]],
-                predict_edge_index: torch.Tensor
-               ) -> torch.Tensor:
+                target_edges: Optional[torch.Tensor] = None, # 对于链接预测是必需的
+                **kwargs: Any
+                ) -> torch.Tensor:
 
-        num_snapshots = len(snapshots_data)
-        if num_snapshots == 0: raise ValueError("输入快照列表不能为空")
+       
+        node_representations = self.backbone(snapshots_data, **kwargs)
 
+        if isinstance(self.task_head, LinkPredictorHead):
+            if target_edges is None:
+                raise ValueError("LinkPredictorHead 需要 target_edges 参数。")
+            logits = self.task_head(node_representations, target_edges, **kwargs)
+        else:
+            logits = self.task_head(node_representations, target_edges=target_edges, **kwargs)
 
-        num_nodes = snapshots_data[0]['unibasis_features'].shape[0]
-        device = snapshots_data[0]['unibasis_features'].device
-        total_unibasis_dim = snapshots_data[0]['unibasis_features'].shape[1]
-        current_F = self.unibasis_base_feature_dim
+        return logits
 
-        if total_unibasis_dim % (self.K + 1) != 0:
-            raise ValueError(f"UniBasis 特征维度 ({total_unibasis_dim}) "
-                             f"无法被 K+1 ({self.K+1}) 整除。")
-        single_feature_dim_F_calculated = total_unibasis_dim // (self.K + 1)
-        lstm_inputs = []
-
-
-        for t in range(num_snapshots):
-
-            unibasis_features_t = snapshots_data[t]['unibasis_features']
-
-            try:
-                unibasis_t_reshaped = unibasis_features_t.view(
-                    num_nodes, self.K + 1, current_F # 使用 current_F
-                )
-            except RuntimeError as e:
-                 print(f"在时间步 {t} reshape UniBasis 特征时出错: {e}")
-                 raise e
-
-            combined_repr_t = self.combination(unibasis_t_reshaped) # [N, F]
-
-            lstm_inputs.append(combined_repr_t)
-
-
-        lstm_input_tensor_seq_first = torch.stack(lstm_inputs, dim=0)
-
-        lstm_input_tensor = lstm_input_tensor_seq_first.permute(1, 0, 2)
-
-        lstm_output_sequence, (final_h, final_c) = self.lstm_encoder(lstm_input_tensor)
-
-        final_node_repr = lstm_output_sequence[:, -1, :] # [N, lstm_hidden_dim]
-
-        src_nodes_repr = final_node_repr[predict_edge_index[0]]
-        dst_nodes_repr = final_node_repr[predict_edge_index[1]]
-
-        # 链接预测
-        link_logits = self.link_predictor(src_nodes_repr, dst_nodes_repr)
-
-        return link_logits.squeeze(-1) # 返回 [num_predict_edges]
+    def reset_parameters(self):
+        """(可选) 重置整个模型的参数"""
+        print("DynSpectral (Wrapper): 重置参数...")
+        if hasattr(self.backbone, 'reset_parameters'):
+            self.backbone.reset_parameters()
+        if hasattr(self.task_head, 'reset_parameters'):
+            self.task_head.reset_parameters()

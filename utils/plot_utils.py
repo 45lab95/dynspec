@@ -30,7 +30,7 @@ def plot_training_curves(history: Dict[str, List[float]],
         return
 
     # 检查必要的键是否存在
-    required_keys = ['train_loss', 'val_auc', 'val_ap']
+    required_keys = ['train_loss', 'val_auc', 'val_ap', 'val_f1'] # 添加 val_f1
     if not all(key in history for key in required_keys):
         print(f"绘图错误：历史记录字典缺少必要的键。需要: {required_keys}")
         return
@@ -45,8 +45,9 @@ def plot_training_curves(history: Dict[str, List[float]],
     # 确保所有列表长度一致 (如果 epoch 是后来添加的)
     if len(history['train_loss']) != num_epochs or \
        len(history['val_auc']) != num_epochs or \
-       len(history['val_ap']) != num_epochs:
-           min_len = min(len(history['train_loss']), len(history['val_auc']), len(history['val_ap']))
+       len(history['val_ap']) != num_epochs or \
+       len(history['val_f1']) != num_epochs:
+           min_len = min(len(history['train_loss']), len(history['val_auc']), len(history['val_ap']),len(history['val_f1']))
            print(f"绘图警告：历史记录列表长度不一致，将截取到最短长度 {min_len}。")
            epochs = epochs[:min_len]
            history['train_loss'] = history['train_loss'][:min_len]
@@ -60,7 +61,7 @@ def plot_training_curves(history: Dict[str, List[float]],
 
     # --- 创建图表 ---
     # 创建一个包含两个子图的图表 (一个用于 Loss, 一个用于 AUC/AP)
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5)) # 1 行 2 列
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
 
     # --- 绘制 Loss 曲线 ---
     ax1 = axes[0]
@@ -72,12 +73,14 @@ def plot_training_curves(history: Dict[str, List[float]],
     ax1.grid(True)
 
     # --- 绘制 AUC 和 AP 曲线 ---
+    # --- 绘制 AUC, AP, F1 曲线 (ax2) ---
     ax2 = axes[1]
     ax2.plot(epochs, history['val_auc'], label='Validation AUC', marker='s', linestyle='-')
     ax2.plot(epochs, history['val_ap'], label='Validation AP', marker='^', linestyle='--')
+    ax2.plot(epochs, history['val_f1'], label='Validation F1', marker='x', linestyle=':') # 添加 F1
     ax2.set_xlabel("Epoch")
     ax2.set_ylabel("Score")
-    ax2.set_title("Validation AUC & AP over Epochs")
+    ax2.set_title("Validation Metrics over Epochs")
     ax2.legend()
     ax2.grid(True)
     # 可以设置 Y 轴范围以便更好地查看细微变化，例如:

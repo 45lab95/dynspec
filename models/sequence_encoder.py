@@ -44,4 +44,3 @@ class LSTMWrapper(nn.Module):
         h_0 = torch.zeros(self.num_layers * self.num_directions, batch_size, self.hidden_size, device=device)
         c_0 = torch.zeros(self.num_layers * self.num_directions, batch_size, self.hidden_size, device=device)
         return (h_0, c_0)
-

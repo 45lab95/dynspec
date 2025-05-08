@@ -3,9 +3,11 @@ checkpoints/
 data/
 bitcoin_otc_pyg_raw/
 
+config/
+
 # Logs
 *.log
-myout.log
+logs/
 
 # Python cache
 __pycache__/
@@ -15,4 +17,5 @@ __pycache__/
 .idea/
 .vscode/
 
-# Add other things you want to ignore
+# result plot
+plots/

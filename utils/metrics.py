@@ -3,6 +3,7 @@
 import numpy as np
 from sklearn.metrics import roc_auc_score as sk_roc_auc_score
 from sklearn.metrics import average_precision_score as sk_average_precision_score
+from sklearn.metrics import f1_score as sk_f1_score
 
 def roc_auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
 
@@ -26,4 +27,19 @@ def average_precision_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
         return float(sk_average_precision_score(y_true, y_score))
     except ValueError as e:
         print(f"计算 Average Precision 时出错: {e}")
+        return 0.0
+
+
+def f1_score(y_true: np.ndarray, y_pred_probs: np.ndarray, threshold: float = 0.5) -> float:
+    y_pred_binary = (y_pred_probs >= threshold).astype(int)
+
+    if len(np.unique(y_true)) < 2 or len(np.unique(y_pred_binary)) < 2 :
+        if np.array_equal(y_true, y_pred_binary):
+            return 1.0
+        else: 
+            if np.sum(y_true) == 0 and np.sum(y_pred_binary) == 0: 
+                return 1.0 
+    try:
+        return float(sk_f1_score(y_true, y_pred_binary, zero_division=0))
+    except ValueError:
         return 0.0
