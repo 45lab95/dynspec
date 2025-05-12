@@ -9,22 +9,7 @@ def plot_training_curves(history: Dict[str, List[float]],
                          save_dir: str = "plots",
                          filename: str = "training_curves.png",
                          epoch_offset: int = 0):
-    """
-    绘制训练和验证过程中的损失和指标曲线。
 
-    Args:
-        history (Dict[str, List[float]]): 包含训练历史记录的字典。
-            预期的键包括:
-            - 'epoch': 轮数列表 (可选, 如果没有则按索引绘制)
-            - 'train_loss': 每轮的训练损失列表
-            - 'val_auc': 每轮的验证 AUC 列表
-            - 'val_ap': 每轮的验证 AP 列表
-            (可以根据需要添加其他指标)
-        title (str, optional): 图表的标题。默认为 "Training Curves"。
-        save_dir (str, optional): 保存绘图文件的目录。默认为 "plots"。
-        filename (str, optional): 保存绘图的文件名。默认为 "training_curves.png"。
-        epoch_offset (int, optional): 如果从某个非零 epoch 开始记录，可以设置偏移量。默认为 0。
-    """
     if not history:
         print("绘图错误：历史记录字典为空。")
         return
@@ -72,7 +57,6 @@ def plot_training_curves(history: Dict[str, List[float]],
     ax1.legend()
     ax1.grid(True)
 
-    # --- 绘制 AUC 和 AP 曲线 ---
     # --- 绘制 AUC, AP, F1 曲线 (ax2) ---
     ax2 = axes[1]
     ax2.plot(epochs, history['val_auc'], label='Validation AUC', marker='s', linestyle='-')
@@ -104,26 +88,3 @@ def plot_training_curves(history: Dict[str, List[float]],
     # 关闭图表以释放内存 (如果在非交互式环境运行，这很重要)
     plt.close(fig)
 
-# --- 示例用法 ---
-if __name__ == '__main__':
-    # 创建一些模拟的训练历史数据
-    mock_history = {
-        'epoch': list(range(1, 51)),
-        'train_loss': [1.0 / (i*0.5 + 1) + np.random.rand()*0.1 for i in range(50)],
-        'val_auc': [0.6 + (1 - 1.0 / (i*0.8 + 1)) * 0.35 + np.random.rand()*0.02 for i in range(50)],
-        'val_ap': [0.5 + (1 - 1.0 / (i*0.7 + 1)) * 0.45 + np.random.rand()*0.03 for i in range(50)]
-    }
-    # 模拟 Val AUC 在后期略微下降的情况
-    for i in range(40, 50):
-        mock_history['val_auc'][i] -= (i - 40) * 0.002
-
-    # 调用绘图函数
-    plot_training_curves(mock_history,
-                         title="示例训练曲线",
-                         save_dir="test_plots",
-                         filename="sample_curves.png")
-
-    # 测试空数据或缺少键的情况
-    plot_training_curves({}, title="空历史记录")
-    plot_training_curves({'train_loss': [0.1, 0.2]}, title="缺少键的历史记录")
-    plot_training_curves({'train_loss': [], 'val_auc': [], 'val_ap': []}, title="空列表的历史记录")

@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple
 from tqdm import tqdm # 可选，用于进度条
 
 # 导入项目模块
-from utils.data_loader import load_bitcoin_otc_data, get_dynamic_data_splits, generate_node_features
+from utils.data_loader import *
 from utils.metrics import roc_auc_score, average_precision_score
 from utils.metrics import f1_score
 from utils.torch_utils import set_seed, get_device
@@ -112,11 +112,18 @@ def evaluate(model: DynSpectral,
 
 
 def main():
-    # --- 参数设置 (进行修改) ---
+    # --- 参数设置 ---
     parser = argparse.ArgumentParser(description='Dynamic Graph Learning with UniBasis (DynSpectral)')
     # 数据集参数
-    parser.add_argument('--dataset_root', type=str, default='./bitcoin_otc_pyg_raw', help='PyG 数据集根目录')
-    parser.add_argument('--edge_window_size', type=int, default=10, help='BitcoinOTC 边窗口大小')
+    parser.add_argument('--dataset_name', type=str, default='bitcoin_otc', choices=['bitcoin_otc', 'uci'],
+                        help='要使用的数据集名称 (bitcoin_otc or uc_irvine)')
+    parser.add_argument('--bitcoin_otc_root', type=str, default='./data/bitcoin_otc_pyg_raw',
+                        help='BitcoinOTC PyG 数据集根目录')
+    parser.add_argument('--uc_irvine_path', type=str, default='data/uci/out.opsahl-ucsocial',
+                        help='UC Irvine messages 原始数据文件路径')
+    parser.add_argument('--edge_window_size', type=int, default=10,
+                        help='BitcoinOTC 边窗口大小 (对 UC Irvine 无效)')
+
     # UniBasis (Backbone) 参数
     parser.add_argument('--K', type=int, default=10, help='UniBasis 多项式阶数')
     parser.add_argument('--tau', type=float, default=0.5, help='UniBasis 同配/异配混合系数 τ')
@@ -127,7 +134,7 @@ def main():
     parser.add_argument('--lstm_layers', type=int, default=1, help='LSTM 层数')
     parser.add_argument('--lstm_dropout', type=float, default=0.0, help='LSTM 层间 dropout')
     # LinkPredictorHead (Task Head) 参数
-    parser.add_argument('--link_pred_hidden', type=int, default=64, help='链接预测头 MLP 隐藏维度 (不填则无隐藏层)')
+    parser.add_argument('--link_pred_hidden', type=int, default=64, help='链接预测头 MLP 隐藏维度')
     # 训练参数
     parser.add_argument('--epochs', type=int, default=200, help='训练轮数')
     parser.add_argument('--lr_comb', type=float, default=0.005, help='Combination 层学习率')
@@ -143,31 +150,46 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--device', type=str, default='auto', help='计算设备 (auto, cpu, cuda:0)')
     parser.add_argument('--save_dir', type=str, default='checkpoints', help='模型保存目录')
-    parser.add_argument('--model_name', type=str, default='dynspectral_unibasis_bitcoin.pt', help='模型文件名')
+    parser.add_argument('--model_name_prefix', type=str, default='dynspectral_unibasis', help='模型文件名前缀') # 使用前缀
 
     args = parser.parse_args()
     print("--- 配置参数 ---")
-    for arg, value in sorted(vars(args).items()): # 排序后打印更易读
+    for arg, value in sorted(vars(args).items()):
         print(f"  {arg}: {value}")
 
     # --- 设置环境 ---
     set_seed(args.seed)
     device = get_device(args.device)
+    # 根据数据集动态生成模型文件名
+    args.model_name = f"{args.model_name_prefix}_{args.dataset_name.lower()}.pt"
     plot_save_dir = "plots"
     plot_filename = f"curves_{args.model_name.replace('.pt', '')}.png"
     os.makedirs(args.save_dir, exist_ok=True)
     model_save_path = os.path.join(args.save_dir, args.model_name)
 
-    # --- 加载和准备数据 ---
+    # --- 加载和准备数据 (根据 dataset_name 选择加载函数) ---
     print("\n--- 加载数据 ---")
-    snapshots_data, num_nodes, feature_dim_F = load_bitcoin_otc_data(
-        root=args.dataset_root,
-        edge_window_size=args.edge_window_size,
-        feature_generator=generate_node_features,
-        K=args.K,
-        tau=args.tau,
-        h_hat_global=args.h_hat_global
-    )
+    if args.dataset_name.lower() == 'bitcoin_otc':
+        snapshots_data, num_nodes, feature_dim_F = load_bitcoin_otc_data(
+            root=args.bitcoin_otc_root, # 使用 bitcoin_otc_root 参数
+            edge_window_size=args.edge_window_size,
+            feature_generator=generate_node_features,
+            K=args.K,
+            tau=args.tau,
+            h_hat_global=args.h_hat_global
+        )
+    elif args.dataset_name.lower() == 'uci':
+        snapshots_data, num_nodes, feature_dim_F = load_uc_irvine_message_data(
+            data_path=args.uc_irvine_path, # 使用 uc_irvine_path 参数
+            feature_generator=generate_node_features,
+            K=args.K,
+            tau=args.tau,
+            h_hat_global=args.h_hat_global
+        )
+    else:
+        raise ValueError(f"未知或不支持的数据集名称: {args.dataset_name}")
+
+    
     num_time_steps = len(snapshots_data)
     train_steps_idx, val_steps_idx, test_steps_idx = get_dynamic_data_splits(
         num_time_steps, args.train_ratio, args.val_ratio
@@ -255,7 +277,6 @@ def main():
         print(f"Loading best model from {model_save_path}")
         model.load_state_dict(torch.load(model_save_path))
         test_auc, test_ap, test_f1 = evaluate(model, test_input_snapshots, test_target_edges, device) # 接收 F1
-        # 更新打印信息
         print(f"Test Results --> Avg AUC: {test_auc:.4f} | Avg AP: {test_ap:.4f} | Avg F1: {test_f1:.4f}")
     else:
         print(f"错误：找不到保存的最佳模型 '{model_save_path}'，无法进行测试。")

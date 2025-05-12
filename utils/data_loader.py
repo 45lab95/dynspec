@@ -8,6 +8,8 @@ from typing import List, Dict, Tuple, Optional
 from tqdm import tqdm
 import math
 import gc
+import pandas as pd # 用于方便地处理时间戳和分组
+import datetime # 用于处理日期
 
 
 from .preprocess_utils import compute_propagation_matrix
@@ -62,23 +64,7 @@ def compute_unibasis_for_snapshot(p_matrix: torch.Tensor,
                                   K: int,
                                   tau: float,
                                   h_hat: float) -> Tuple[torch.Tensor, int]:
-    """
-    为单个时间步计算 UniBasis 基向量 (移植自 UniFilter)。
 
-    Args:
-        p_matrix (torch.Tensor): 当前时间步的传播矩阵 P_t [N, N] (sparse)。
-                                 通常是对称归一化邻接矩阵 A_sym。
-        features (torch.Tensor): 当前时间步的初始节点特征 X_t [N, F]。
-        K (int): 多项式的最大阶数。
-        tau (float): 同配/异配基的混合系数 τ。
-        h_hat (float): 估计的同配率 ĥ，用于计算目标角度。
-
-    Returns:
-        Tuple[torch.Tensor, int]:
-            - unibasis_features (torch.Tensor): 拼接后的 UniBasis 特征矩阵
-                                                 [N, (K+1)*F]。
-            - feature_dim (int): 单个基向量的特征维度 F。
-    """
     num_nodes, feature_dim = features.shape
     device = features.device
     cosval = math.cos(math.pi * (1.0 - h_hat) / 2.0)
@@ -137,6 +123,123 @@ def compute_unibasis_for_snapshot(p_matrix: torch.Tensor,
 
     return unibasis_features, feature_dim
 
+
+def load_uc_irvine_message_data(
+    data_path: str, # 原始数据文件路径, e.g., "data/uc_irvine_messages/out.opsahl-ucsocial"
+    feature_generator=generate_node_features,
+    K: int = 10,
+    tau: float = 0.5,
+    h_hat_global: Optional[float] = 0.5,
+    min_nodes_remap: bool = True # 是否将节点ID从0开始重新映射
+) -> Tuple[List[Dict[str, torch.Tensor]], int, int]:
+
+    print(f"加载 UC Irvine messages 数据集从: {data_path}")
+    print(f"参数: K={K}, tau={tau}, h_hat={h_hat_global}")
+
+    # 1. 读取原始数据文件
+    # 假设文件是空白分隔，并且至少有4列: src, dst, weight, timestamp
+    try:
+        # 使用 pandas 读取可以方便处理不同数量的列和时间转换
+        df = pd.read_csv(data_path, sep=r'\s+', header=None, comment='%',
+                         names=['src', 'dst', 'weight', 'timestamp'])
+    except pd.errors.ParserError:
+        print("尝试解析为3列 (无权重)...")
+        try:
+            df = pd.read_csv(data_path, sep=r'\s+', header=None, comment='%',
+                            names=['src', 'dst', 'timestamp'])
+            df['weight'] = 1 # 如果没有权重列，默认权重为1
+        except Exception as e:
+            raise ValueError(f"无法解析数据文件 {data_path}: {e}")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"数据文件未找到: {data_path}")
+
+    print(f"  原始数据共 {len(df)} 条边/事件。")
+
+    if min_nodes_remap:
+        all_nodes = pd.unique(df[['src', 'dst']].values.ravel('K'))
+        node_map = {node_id: i for i, node_id in enumerate(all_nodes)}
+        df['src'] = df['src'].map(node_map)
+        df['dst'] = df['dst'].map(node_map)
+        num_nodes = len(all_nodes)
+        print(f"  节点 ID 已重新映射，总节点数: {num_nodes}")
+    else:
+        # 假设原始节点ID已经是0到N-1，或者用户自己处理
+        num_nodes = max(df['src'].max(), df['dst'].max()) + 1
+        print(f"  使用原始节点 ID，推断总节点数: {num_nodes} (确保ID从0开始)")
+
+
+    df['date'] = pd.to_datetime(df['timestamp'], unit='s').dt.date
+    df = df.sort_values(by='timestamp') # 按时间排序
+    unique_dates = sorted(df['date'].unique())
+    print(f"  数据覆盖从 {unique_dates[0]} 到 {unique_dates[-1]}，共 {len(unique_dates)} 天。")
+    snapshots_intermediate = []
+    feature_dim_F = -1 # 初始化
+
+    if h_hat_global is None:
+        h_hat_current = 0.5
+    else:
+        h_hat_current = h_hat_global
+    print(f"  使用全局估计同配率 h_hat = {h_hat_current:.4f}")
+
+    print("步骤 1: 按天构建图快照并计算 UniBasis...")
+    for current_date in tqdm(unique_dates, desc="构建每日快照"):
+        # 筛选当前日期的边
+        edges_for_day = df[df['date'] == current_date][['src', 'dst']].values.astype(np.int64)
+
+        if edges_for_day.shape[0] == 0: # 当天没有边
+            edge_index_t = torch.empty((2, 0), dtype=torch.long)
+        else:
+            edge_index_t = torch.from_numpy(edges_for_day.T)
+
+        edge_index_t_undirected = to_undirected(edge_index_t, num_nodes=num_nodes)
+        device = edge_index_t_undirected.device 
+
+ 
+        p_matrix_t = compute_propagation_matrix(edge_index_t_undirected, num_nodes)
+
+        initial_features_t = feature_generator(edge_index_t_undirected, num_nodes)
+        if feature_dim_F == -1:
+            feature_dim_F = initial_features_t.shape[1]
+
+        unibasis_features_t, _ = compute_unibasis_for_snapshot(
+            p_matrix=p_matrix_t,
+            features=initial_features_t,
+            K=K, tau=tau, h_hat=h_hat_current
+        )
+
+        snapshots_intermediate.append({
+            'unibasis_features': unibasis_features_t,
+            'current_edges': edge_index_t_undirected # 存储当天的无向边，用于下一个快照的标签
+        })
+
+    snapshots_data_final = []
+    print("\n步骤 2: 准备链接预测标签...")
+    for t in tqdm(range(len(snapshots_intermediate) - 1), desc="准备标签"):
+        current_day_info = snapshots_intermediate[t]
+        next_day_info = snapshots_intermediate[t+1]
+        device = current_day_info['unibasis_features'].device
+
+        pos_edge_index_label = next_day_info['current_edges']
+
+        neg_edge_index_label = negative_sampling(
+            edge_index=pos_edge_index_label,
+            num_nodes=num_nodes,
+            num_neg_samples=pos_edge_index_label.size(1) if pos_edge_index_label.numel() > 0 else 1000, # 保证有负样本
+            method='sparse'
+        )
+
+        snapshots_data_final.append({
+            'unibasis_features': current_day_info['unibasis_features'],
+            'pos_edge_index': pos_edge_index_label,
+            'neg_edge_index': neg_edge_index_label
+        })
+
+    print(f"\nUC Irvine 数据处理完成。共生成 {len(snapshots_data_final)} 个 (特征, 标签对) 快照。")
+    print(f"  节点数量: {num_nodes}")
+    print(f"  单个 UniBasis 基向量特征维度 F: {feature_dim_F}")
+    return snapshots_data_final, num_nodes, feature_dim_F
+
+
 def load_bitcoin_otc_data(root: str = './bitcoin_otc_pyg_raw',
                           edge_window_size: int = 10,
                           feature_generator = generate_node_features,
@@ -144,10 +247,6 @@ def load_bitcoin_otc_data(root: str = './bitcoin_otc_pyg_raw',
                           tau: float = 0.5,
                           h_hat_global: Optional[float] = 0.5
                           ) -> Tuple[List[Dict[str, torch.Tensor]], int, int]:
-    """
-    加载并预处理 BitcoinOTC 数据集。
-    标签为：预测下一个时间片所有可能存在的链接。
-    """
     print(f"加载 BitcoinOTC 数据集 (edge_window_size={edge_window_size}, K={K}, tau={tau}, h_hat={h_hat_global})...")
     dataset = BitcoinOTC(root=root, edge_window_size=edge_window_size)
     num_nodes = dataset[0].num_nodes
