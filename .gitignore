@@ -19,3 +19,7 @@ __pycache__/
 
 # result plot
 plots/
+
+# dataset test
+testotc.py
+
